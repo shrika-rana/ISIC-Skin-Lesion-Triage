@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Dataset
+data/
+dataset/
+datasets/
+Benign/
+Malignant/
+isic-skin-lesion-dataset/
+
+# Generated training outputs
+models/
+artifacts/
+
+# TensorFlow / checkpoints
+*.h5
+*.keras
+*.ckpt
+
+# Logs
+*.log
