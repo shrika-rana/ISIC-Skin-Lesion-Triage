@@ -43,7 +43,7 @@ BATCH_SIZE = 32
 
 # First use QUICK_MODE=True to verify that the whole notebook/script runs.
 # Set QUICK_MODE=False for your final project experiments/report.
-QUICK_MODE = False
+QUICK_MODE = True
 
 RUN_ABLATIONS = True
 RUN_OPTIMIZER_SWEEP = True
