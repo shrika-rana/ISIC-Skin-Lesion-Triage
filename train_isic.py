@@ -261,7 +261,8 @@ def show_samples(dataset, n=9):
     plt.show()
 
 show_samples(train_ds)
-
+# Resume from previously completed experiments
+RESUME_FROM_OPTIMIZER = True
 
 # ============================================================
 # 6. CLASS WEIGHTS
@@ -503,7 +504,7 @@ ABLATION_CONFIGS = {
     ),
 }
 
-if RUN_ABLATIONS:
+if RUN_ABLATIONS and not RESUME_FROM_OPTIMIZER:
     for run_name, cfg in ABLATION_CONFIGS.items():
         print("\n" + "=" * 80)
         print("ABLATION:", run_name, cfg)
@@ -561,9 +562,14 @@ if RUN_ABLATIONS:
 # ============================================================
 # 13. OPTIMIZER + LEARNING-RATE SWEEP
 # ============================================================
+# ============================================================
+# 13. OPTIMIZER SWEEP — RESUMABLE
+# ============================================================
+
 sweep_results = []
 
 if RUN_OPTIMIZER_SWEEP:
+
     sweep_grid = {
         "adam": [1e-4, 3e-4, 1e-3],
         "sgd": [1e-3, 3e-3, 1e-2],
@@ -572,14 +578,63 @@ if RUN_OPTIMIZER_SWEEP:
 
     full_reg_cfg = ABLATION_CONFIGS["D_full_regularization"]
 
+    # --------------------------------------------------------
+    # LOAD RESULTS FROM PREVIOUS RUN, IF THEY EXIST
+    # --------------------------------------------------------
+    sweep_csv = ARTIFACT_DIR / "optimizer_sweep_results.csv"
+
+    if sweep_csv.exists():
+        previous_sweep_df = pd.read_csv(sweep_csv)
+        sweep_results = previous_sweep_df.to_dict("records")
+
+        print("\nLoaded previous optimizer results:")
+        print(previous_sweep_df[
+            ["optimizer", "learning_rate", "val_pr_auc"]
+        ])
+
+    # --------------------------------------------------------
+    # RUN ONLY EXPERIMENTS THAT HAVE NOT ALREADY BEEN SAVED
+    # --------------------------------------------------------
+    completed_runs = set()
+
+# Detect experiments that were already trained and saved
+for optimizer_name, learning_rates in sweep_grid.items():
+
+    for lr in learning_rates:
+
+        run_name = f"sweep_{optimizer_name}_{lr:g}".replace(".", "p")
+
+        saved_model = MODEL_DIR / f"{run_name}.keras"
+
+        if saved_model.exists():
+            completed_runs.add(run_name)
+
+print("\nAlready completed:")
+
+for run_name in sorted(completed_runs):
+    print("  ", run_name)
+
+    # --------------------------------------------------------
+    # CONTINUE THE SWEEP
+    # --------------------------------------------------------
     for optimizer_name, learning_rates in sweep_grid.items():
+
         for lr in learning_rates:
+
             run_name = f"sweep_{optimizer_name}_{lr:g}".replace(".", "p")
+
+            # Skip experiments that were already completed
+            if run_name in completed_runs:
+                print("\nSKIPPING:", run_name, "(already completed)")
+                continue
+
             print("\n" + "=" * 80)
-            print("SWEEP:", optimizer_name, lr)
+            print("RUNNING:", optimizer_name, lr)
 
             tf.keras.backend.clear_session()
+
             model = build_baseline_cnn(**full_reg_cfg)
+
             model, history = train_model(
                 model=model,
                 train_data=exp_train_ds,
@@ -592,17 +647,47 @@ if RUN_OPTIMIZER_SWEEP:
             row = history_best_row(history, run_name)
             row["optimizer"] = optimizer_name
             row["learning_rate"] = lr
+
             sweep_results.append(row)
 
+            # Save immediately after EACH experiment
+            pd.DataFrame(sweep_results).to_csv(
+                sweep_csv,
+                index=False
+            )
+
+            print("\nSaved:", run_name)
+
+    # --------------------------------------------------------
+    # FINAL SWEEP SUMMARY
+    # --------------------------------------------------------
     sweep_df = pd.DataFrame(sweep_results)
-    sweep_df.to_csv(ARTIFACT_DIR / "optimizer_sweep_results.csv", index=False)
+
+    sweep_df.to_csv(
+        ARTIFACT_DIR / "optimizer_sweep_results.csv",
+        index=False
+    )
 
     print("\nOptimizer sweep summary:")
-    cols = [c for c in [
-        "optimizer", "learning_rate", "best_epoch",
-        "val_accuracy", "val_recall", "val_roc_auc", "val_pr_auc", "val_loss"
-    ] if c in sweep_df.columns]
-    print(sweep_df[cols].sort_values("val_pr_auc", ascending=False))
+
+    cols = [
+        c for c in [
+            "optimizer",
+            "learning_rate",
+            "best_epoch",
+            "val_accuracy",
+            "val_recall",
+            "val_roc_auc",
+            "val_pr_auc",
+            "val_loss",
+        ]
+        if c in sweep_df.columns
+    ]
+
+    print(
+        sweep_df[cols]
+        .sort_values("val_pr_auc", ascending=False)
+    )
 
 
 # ============================================================
