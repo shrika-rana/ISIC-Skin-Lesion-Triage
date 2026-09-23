@@ -34,6 +34,8 @@ from sklearn.metrics import (
 
 warnings.filterwarnings("ignore")
 
+RESUME_COMPLETED = True
+
 # ============================================================
 # 1. CONFIGURATION
 # ============================================================
@@ -45,9 +47,11 @@ BATCH_SIZE = 32
 # Set QUICK_MODE=False for your final project experiments/report.
 QUICK_MODE = True
 
-RUN_ABLATIONS = True
-RUN_OPTIMIZER_SWEEP = True
+RUN_ABLATIONS = False
+RUN_OPTIMIZER_SWEEP = False
 RUN_TRANSFER_LEARNING = True
+RUN_FINAL_CNN = False
+RESNET_ONLY = True
 
 ABLATION_EPOCHS = 4 if QUICK_MODE else 12
 SWEEP_EPOCHS = 3 if QUICK_MODE else 7
@@ -597,30 +601,23 @@ if RUN_OPTIMIZER_SWEEP:
     # --------------------------------------------------------
     completed_runs = set()
 
-# Detect experiments that were already trained and saved
-for optimizer_name, learning_rates in sweep_grid.items():
+    # Detect experiments that were already trained and saved
+    for optimizer_name, learning_rates in sweep_grid.items():
+        for lr in learning_rates:
+            run_name = f"sweep_{optimizer_name}_{lr:g}".replace(".", "p")
+            saved_model = MODEL_DIR / f"{run_name}.keras"
+            if saved_model.exists():
+                completed_runs.add(run_name)
 
-    for lr in learning_rates:
-
-        run_name = f"sweep_{optimizer_name}_{lr:g}".replace(".", "p")
-
-        saved_model = MODEL_DIR / f"{run_name}.keras"
-
-        if saved_model.exists():
-            completed_runs.add(run_name)
-
-print("\nAlready completed:")
-
-for run_name in sorted(completed_runs):
-    print("  ", run_name)
+    print("\nAlready completed:")
+    for run_name in sorted(completed_runs):
+        print("  ", run_name)
 
     # --------------------------------------------------------
     # CONTINUE THE SWEEP
     # --------------------------------------------------------
     for optimizer_name, learning_rates in sweep_grid.items():
-
         for lr in learning_rates:
-
             run_name = f"sweep_{optimizer_name}_{lr:g}".replace(".", "p")
 
             # Skip experiments that were already completed
@@ -712,25 +709,29 @@ print("Best scratch-CNN learning rate:", BEST_LR)
 # ============================================================
 # 15. TRAIN FINAL FULL-REGULARIZED SCRATCH CNN ON ALL TRAIN DATA
 # ============================================================
-tf.keras.backend.clear_session()
+final_cnn = None
+final_cnn_history = None
 
-final_cnn = build_baseline_cnn(
-    use_dropout=True,
-    use_batchnorm=True,
-    use_l2=True,
-    use_augmentation=True,
-)
+if RUN_FINAL_CNN:
+    tf.keras.backend.clear_session()
 
-final_cnn, final_cnn_history = train_model(
-    model=final_cnn,
-    train_data=train_ds,
-    run_name="final_regularized_cnn",
-    epochs=BASELINE_FINAL_EPOCHS,
-    optimizer_name=BEST_OPTIMIZER,
-    learning_rate=BEST_LR,
-)
+    final_cnn = build_baseline_cnn(
+        use_dropout=True,
+        use_batchnorm=True,
+        use_l2=True,
+        use_augmentation=True,
+    )
 
-final_cnn.save(MODEL_DIR / "final_regularized_cnn.keras")
+    final_cnn, final_cnn_history = train_model(
+        model=final_cnn,
+        train_data=train_ds,
+        run_name="final_regularized_cnn",
+        epochs=BASELINE_FINAL_EPOCHS,
+        optimizer_name=BEST_OPTIMIZER,
+        learning_rate=BEST_LR,
+    )
+
+    final_cnn.save(MODEL_DIR / "final_regularized_cnn.keras")
 
 
 # ============================================================
@@ -867,7 +868,8 @@ def plot_history(history_dict, title_prefix, filename_prefix):
         plt.savefig(ARTIFACT_DIR / f"{filename_prefix}_recall.png", dpi=160)
         plt.show()
 
-plot_history(final_cnn_history, "Final Regularized CNN", "final_cnn")
+if final_cnn_history is not None:
+    plot_history(final_cnn_history, "Final Regularized CNN", "final_cnn")
 
 if RUN_TRANSFER_LEARNING and transfer_history_combined:
     plot_history(
@@ -962,11 +964,13 @@ def validation_profile(model, model_name):
     }
     return row
 
-candidate_models = {
-    "final_regularized_cnn": final_cnn,
-}
+candidate_models = {}
+if final_cnn is not None:
+    candidate_models["final_regularized_cnn"] = final_cnn
 if RUN_TRANSFER_LEARNING and transfer_model is not None:
     candidate_models["resnet50_finetuned"] = transfer_model
+if not candidate_models:
+    raise RuntimeError("No trained candidate models were available for validation selection.")
 
 validation_rows = [
     validation_profile(model, name)
