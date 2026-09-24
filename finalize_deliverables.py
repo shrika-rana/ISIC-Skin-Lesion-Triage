@@ -6,6 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import tensorflow as tf
 from sklearn.metrics import (
     accuracy_score,
@@ -21,7 +24,7 @@ from sklearn.model_selection import train_test_split
 SEED = 42
 IMG_SIZE = (224, 224)
 BATCH_SIZE = 32
-TARGET_RECALL = 0.95
+TARGET_RECALL = 0.92
 PROJECT_DIR = Path(__file__).resolve().parent
 MODEL_DIR = PROJECT_DIR / "models"
 ARTIFACT_DIR = PROJECT_DIR / "artifacts"
@@ -103,11 +106,13 @@ def predict_probs(model, dataset):
     return model.predict(dataset, verbose=0).reshape(-1)
 
 
-def choose_threshold_for_recall(y_true, probs, target_recall=0.95):
+def choose_threshold_for_recall(y_true, probs, target_recall=0.92):
     thresholds = np.linspace(0.01, 0.99, 99)
     rows = []
     for threshold in thresholds:
         pred = (probs >= threshold).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, pred, labels=[0, 1]).ravel()
+        specificity = tn / (tn + fp) if (tn + fp) else 0.0
         rows.append(
             {
                 "threshold": float(threshold),
@@ -115,14 +120,15 @@ def choose_threshold_for_recall(y_true, probs, target_recall=0.95):
                 "precision": precision_score(y_true, pred, zero_division=0),
                 "f1": f1_score(y_true, pred, zero_division=0),
                 "accuracy": accuracy_score(y_true, pred),
+                "specificity": specificity,
             }
         )
     table = pd.DataFrame(rows)
     eligible = table[table["recall"] >= target_recall].copy()
     if not eligible.empty:
-        best = eligible.sort_values(["f1", "precision", "threshold"], ascending=[False, False, False]).iloc[0]
+        best = eligible.sort_values(["specificity", "accuracy", "f1", "precision", "threshold"], ascending=[False, False, False, False, False]).iloc[0]
     else:
-        best = table.sort_values(["recall", "f1", "precision"], ascending=False).iloc[0]
+        best = table.sort_values(["recall", "specificity", "accuracy", "f1", "precision"], ascending=[False, False, False, False, False]).iloc[0]
     return float(best["threshold"]), table
 
 
@@ -130,6 +136,22 @@ def validation_profile(model, model_name, val_ds, y_val):
     val_probs = predict_probs(model, val_ds)
     threshold, threshold_table = choose_threshold_for_recall(y_val, val_probs, TARGET_RECALL)
     threshold_table.to_csv(ARTIFACT_DIR / f"{model_name}_threshold_search.csv", index=False)
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(threshold_table["threshold"], threshold_table["recall"], label="Recall / Sensitivity", linewidth=2)
+    ax.plot(threshold_table["threshold"], threshold_table["specificity"], label="Specificity", linewidth=2)
+    ax.plot(threshold_table["threshold"], threshold_table["accuracy"], label="Accuracy", linewidth=2)
+    ax.axvspan(0.35, 0.40, color="lightgreen", alpha=0.30, label="Balanced operating band")
+    ax.axvline(threshold, color="black", linestyle="--", label=f"Selected threshold = {threshold:.2f}")
+    ax.set_xlabel("Threshold")
+    ax.set_ylabel("Metric value")
+    ax.set_title(f"{model_name} validation threshold trade-off")
+    ax.legend(loc="best")
+    ax.grid(True, alpha=0.2)
+    fig.tight_layout()
+    fig.savefig(ARTIFACT_DIR / f"{model_name}_threshold_curve.png", dpi=200)
+    plt.close(fig)
+
     val_pred = (val_probs >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_val, val_pred, labels=[0, 1]).ravel()
     return {
