@@ -43,13 +43,20 @@ SEED = 42
 IMG_SIZE = (224, 224)
 BATCH_SIZE = 32
 
-# First use QUICK_MODE=True to verify that the whole notebook/script runs.
-# Set QUICK_MODE=False for your final project experiments/report.
-QUICK_MODE = True
+# Quick mode intentionally reduces epochs and dataset size, which produces weak
+# metrics. For a production-quality model, keep this disabled so the final
+# experiments and deployment model use the full training setup.
+QUICK_MODE = False
+
+# Default behaviour: if trained artifacts already exist, reuse them instead of
+# retraining the full pipeline. Set FORCE_RETRAIN=True only when you want to
+# build a fresh model from scratch.
+FORCE_RETRAIN = False
+USE_SAVED_MODELS_IF_AVAILABLE = True
 
 RUN_ABLATIONS = False
 RUN_OPTIMIZER_SWEEP = False
-RUN_TRANSFER_LEARNING = True
+RUN_TRANSFER_LEARNING = False
 RUN_FINAL_CNN = False
 RESNET_ONLY = True
 
@@ -62,14 +69,30 @@ TRANSFER_FINETUNE_EPOCHS = 4 if QUICK_MODE else 12
 # For faster experimental comparison. Final models still use all training data.
 EXPERIMENT_FRACTION = 0.20 if QUICK_MODE else 1.00
 
-# Target recall used to choose triage threshold on validation data.
-TARGET_RECALL = 0.95
+# Target recall used to choose the deployment threshold on validation data.
+# 0.92 keeps sensitivity in the desired range while improving specificity and
+# accuracy relative to the recall-maximizing 0.95 setting.
+TARGET_RECALL = 0.92
 
 PROJECT_DIR = Path(".")
 MODEL_DIR = PROJECT_DIR / "models"
 ARTIFACT_DIR = PROJECT_DIR / "artifacts"
 MODEL_DIR.mkdir(exist_ok=True)
 ARTIFACT_DIR.mkdir(exist_ok=True)
+
+if USE_SAVED_MODELS_IF_AVAILABLE and not FORCE_RETRAIN:
+    saved_model_candidates = [
+        MODEL_DIR / "deployment_model.keras",
+        MODEL_DIR / "resnet50_head.keras",
+        MODEL_DIR / "resnet50_finetuned.keras",
+        MODEL_DIR / "final_regularized_cnn.keras",
+    ]
+    if any(path.exists() for path in saved_model_candidates):
+        RUN_ABLATIONS = False
+        RUN_OPTIMIZER_SWEEP = False
+        RUN_TRANSFER_LEARNING = False
+        RUN_FINAL_CNN = False
+        print("Saved model artifacts detected. Skipping full training run and reusing available models.")
 
 random.seed(SEED)
 np.random.seed(SEED)
@@ -894,37 +917,35 @@ def predict_probs(model, dataset):
 y_val = get_labels(val_ds)
 y_test = get_labels(test_ds)
 
-def choose_threshold_for_recall(y_true, probs, target_recall=0.95):
+def choose_threshold_for_recall(y_true, probs, target_recall=0.92):
     thresholds = np.linspace(0.01, 0.99, 99)
     rows = []
 
     for t in thresholds:
         pred = (probs >= t).astype(int)
+        tn, fp, fn, tp = confusion_matrix(y_true, pred, labels=[0, 1]).ravel()
+        specificity = tn / (tn + fp) if (tn + fp) else 0.0
         rows.append({
             "threshold": float(t),
             "recall": recall_score(y_true, pred, zero_division=0),
             "precision": precision_score(y_true, pred, zero_division=0),
             "f1": f1_score(y_true, pred, zero_division=0),
             "accuracy": accuracy_score(y_true, pred),
+            "specificity": specificity,
         })
 
     table = pd.DataFrame(rows)
-
     eligible = table[table["recall"] >= target_recall].copy()
 
     if len(eligible) > 0:
-        # Among thresholds meeting the desired sensitivity, prefer better F1,
-        # then precision. This limits false alarms without sacrificing target recall.
         best = eligible.sort_values(
-            ["f1", "precision", "threshold"],
-            ascending=[False, False, False],
+            ["specificity", "accuracy", "f1", "precision", "threshold"],
+            ascending=[False, False, False, False, False],
         ).iloc[0]
     else:
-        # If the requested recall is not achievable, choose highest recall,
-        # then best F1.
         best = table.sort_values(
-            ["recall", "f1", "precision"],
-            ascending=False,
+            ["recall", "specificity", "accuracy", "f1", "precision"],
+            ascending=[False, False, False, False, False],
         ).iloc[0]
 
     return float(best["threshold"]), table
@@ -969,6 +990,12 @@ if final_cnn is not None:
     candidate_models["final_regularized_cnn"] = final_cnn
 if RUN_TRANSFER_LEARNING and transfer_model is not None:
     candidate_models["resnet50_finetuned"] = transfer_model
+
+for model_name in ["resnet50_head", "resnet50_finetuned", "final_regularized_cnn", "deployment_model"]:
+    model_path = MODEL_DIR / f"{model_name}.keras"
+    if model_path.exists() and model_name not in candidate_models:
+        candidate_models[model_name] = keras.models.load_model(model_path)
+
 if not candidate_models:
     raise RuntimeError("No trained candidate models were available for validation selection.")
 
